@@ -1,0 +1,121 @@
+#!/bin/bash
+#----------------------------------------
+# Copyright © Megan Hoover
+# 1/8/2020
+# PhD student at Clemson University
+# This script was written with the help of Nick Lee.
+# This script runs the job and creates data files
+# FOR NONCOLLINEAR VASP CALCULATIONS
+#----------------------------------------
+#PBS -N jobname
+#PBS -l specific for your job
+#PBS -l walltime
+#PBS -j oe
+#PBS -r n
+#PBS -m abe
+#PBS -M email
+
+# Set up the runtime envirionments
+# These are specific to your cluster and program you're using for the calculations
+
+# Prepare the input
+cd $PBS_O_WORKDIR
+SUBDIR="directory where job is running" # I typically run my calculations in a scratch folder because our home directory has a size limit
+echo $SUBDIR
+mkdir -p $SUBDIR
+cp * $SUBDIR
+
+COMDIR="backup directory"
+echo $COMDIR
+mkdir -p $COMDIR
+
+cd $SUBDIR
+
+cp INCAR_GO INCAR
+
+# Loop to resubmit calculations
+for (( n=1; n <= 5 ; n++ )); do
+  cp POSCAR POSCAR_$n
+
+  # Run the processers
+  mpirun -n 4 program_used_for_calculations > output
+
+  cp CONTCAR CONTCAR_$n
+  cp CONTCAR POSCAR
+  cp OSZICAR OSZICAR.$n
+  cp OUTCAR OUTCAR.$n
+  cp CHGCAR CHGCAR_$n
+  cp INCAR INCAR_$n
+
+  # Edit INCAR file such that it re-runs the calcualtion using the CHGCAR file
+  # If you want to re-run using the WAVECAR then use '6s/2/0/1'
+  # line/old/new/number of instances
+  sed -i '5s/0/1/' INCAR
+  sed -i '6s/2/0/' INCAR
+
+  # Extract the magnetization from OUTCAR file
+  parseX=$(cat OUTCAR.${n} | tail -n87 | head -n4 > xtmp.txt)
+  parseY=$(cat OUTCAR.${n} | tail -n65 | head -n4 > ytmp.txt)
+  parseZ=$(cat OUTCAR.${n} | tail -n43 | head -n4 > ztmp.txt)
+
+  # Print the magnetization for the f orbitals into temp files
+  magnetizx=$(awk '{printf "%s ",$6}' xtmp.txt)
+  magnetizy=$(awk '{printf "%s ",$6}' ytmp.txt)
+  magnetizz=$(awk '{printf "%s ",$6}' ztmp.txt)
+
+  # Output is written as X1 X2 X3 X4, Y1 Y2 Y3 Y4, Z1 Z2 Z3 Z4 into Ufchgtemp.txt
+  echo -e "$magnetizx, $magnetizy, $magnetizz" >> Ufchgtemp.txt
+
+  # Assign variables to reorder data
+  a1_x1=$(awk 'FNR == '$n' {print $1}' Ufchgtemp.txt)
+  a2_x2=$(awk 'FNR == '$n' {print $2}' Ufchgtemp.txt)
+  a3_x3=$(awk 'FNR == '$n' {print $3}' Ufchgtemp.txt)
+  a4_x4=$(awk 'FNR == '$n' {print $4}' Ufchgtemp.txt)
+  a1_y1=$(awk 'FNR == '$n' {print $6}' Ufchgtemp.txt)
+  a2_y2=$(awk 'FNR == '$n' {print $7}' Ufchgtemp.txt)
+  a3_y3=$(awk 'FNR == '$n' {print $8}' Ufchgtemp.txt)
+  a4_y4=$(awk 'FNR == '$n' {print $9}' Ufchgtemp.txt)
+  a1_z1=$(awk 'FNR == '$n' {print $11}' Ufchgtemp.txt)
+  a2_z2=$(awk 'FNR == '$n' {print $12}' Ufchgtemp.txt)
+  a3_z3=$(awk 'FNR == '$n' {print $13}' Ufchgtemp.txt)
+  a4_z4=$(awk 'FNR == '$n' {print $14}' Ufchgtemp.txt)
+
+  # Need to force 3 spaces between each of the atom positions
+  MyCustomTab='   '
+
+  # Declare the new AtomPosition array
+  declare -a AtomPosition=("$a1_x1" "$a1_y1" "$a1_z1""$MyCustomTab""$a2_x2" "$a2_y2" "$a2_z2""$MyCustomTab""$a3_x3" "$a3_y3" "$a3_z3""$MyCustomTab""$a4_x4" "$a4_y4" "$a4_z4")
+
+  # Output written as X1 Y1 Z1   X2 Y2 Z2   X3 Y3 Z3   X4 Y4 Z4
+  echo "${AtomPosition[*]}" >> Ufchg.txt
+
+  # Oxygen positions that'll be needed in the NewMAGMOM line
+  OxygenPosition='0 0 0'
+
+  # New magnetization that'll be used to replace the MAGMOM line in the INCAR
+  declare -a NewMAGMOM=("$a1_x1" "$a1_y1" "$a1_z1""$MyCustomTab""$a2_x2" "$a2_y2" "$a2_z2""$MyCustomTab""$a3_x3" "$a3_y3" "$a3_z3""$MyCustomTab""$a4_x4" "$a4_y4" "$a4_z4""$MyCustomTab""$OxygenPosition""$MyCustomTab""$OxygenPosition""$MyCustomTab""$OxygenPosition""$MyCustomTab""$OxygenPosition""$MyCustomTab""$OxygenPosition""$MyCustomTab""$OxygenPosition""$MyCustomTab""$OxygenPosition""$MyCustomTab""$OxygenPosition")
+
+  # Remove the old MAGMOM line and add the new MAGMOM line
+  sed -i '30d' INCAR
+  sed -i "30i \ MAGMOM = ${NewMAGMOM[*]}" INCAR
+
+  # Print band gap using the bandgap.pl script from VTST-UT Chem to bandgap.txt file
+  bandgap.pl | tail -n2 | head -n1 | awk '{print $8}' >> bandgap.txt
+
+  # Print energy from OZICAR to E0_data.txt file
+  cat OSZICAR.$n | tail -n2 | head -n1 | awk '{print $3}' >> E0_data.txt
+
+  # Print the final lattice constants from CONTCAR to LC.txt file
+  a=$(awk 'FNR == 3 {print $1}' CONTCAR_$n)
+  b=$(awk 'FNR == 4 {print $2}' CONTCAR_$n)
+  c=$(awk 'FNR == 5 {print $3}' CONTCAR_$n)
+  declare -a LCarray=("$a" "$b" "$c")
+  echo "${LCarray[*]}" >> LC.txt
+
+  # Use the script grad2 from vasptools (ref:https://www.nsc.liu.se/~pla/vasptools/) to check energy convergence
+  # If EDIFF=1.0E-5, Log\|dE\| should approach -5 for convergence.
+  grad2 OUTCAR.$n | tail -n2 | head -n1| awk '{print $6}' >> Log_abs_dE.txt
+
+  cp * $COMDIR
+
+done
